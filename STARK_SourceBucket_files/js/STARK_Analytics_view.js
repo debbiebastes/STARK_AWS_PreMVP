@@ -197,6 +197,8 @@ var root = new Vue({
             'Sum': '',
             'Count': '',
         },
+        show_query_error_message: false,
+        query_error: '',
         for_next_page: '',
         rel_validation_properties: [],
         filter_validation_properties: [],
@@ -221,6 +223,12 @@ var root = new Vue({
             'Report': {'permission': 'Analytics|Report', 'allowed': false},
             'Custom_Query': {'permission': 'Analytics|Custom Report', 'allowed': false}
         },
+        operations_to_avoid: [
+            'ALTER', 'ANALYZE', 'CALL', 'COMMENT', 'COMMIT', 'CREATE', 'DEALLOCATE', 'DELETE', 'DENY', 'DESC', 
+            'DESCRIBE', 'DROP', 'EXECUTE', 'EXPLAIN', 'GRANT', 'INSERT', 'MERGE', 'PREPARE', 'REFRESH', 'RESET', 
+            'REVOKE', 'ROLLBACK', 'SET', 'SHOW', 'START', 'TRUNCATE', 'UNLOAD', 'UPDATE', 'USE'
+        ],
+        tables_with_permission: ''
     },
     methods: {
         
@@ -333,25 +341,51 @@ var root = new Vue({
             if(root.Analytics.Choose_Report == 'Query Box') {
                 root.Save_Report_Settings['Is_Custom_Report'] = 'Yes'
                 root.Save_Report_Settings['Report_Settings']  = root.Analytics.Query_Box
+                tables_from_query = root.convert_to_system_display(root.extractTableName(root.Analytics.Query_Box))
+                valid_report = root.hasPermission(tables_from_query, root.tables_with_permission)
+                console.log(valid_report)
             } else {
                 root.Save_Report_Settings['Is_Custom_Report'] = 'No'
                 root.Save_Report_Settings['Report_Settings'] = JSON.stringify(data)
+                tables_from_query = data['tables']
+                valid_report = root.hasPermission(tables_from_query, root.tables_with_permission)
+                console.log(valid_report)
             }
-            let payload = { Analytics_Report: root.Save_Report_Settings }
 
-            Analytics_app.add(payload).then( function(data) {
-                if(data == 'OK') {
-                    root.showSuccessSaveReport = true
-                } else {
-                    root.showSuccessSaveReport = false
-                }
+            if(valid_report) {
+                root.show_query_error_message = false
+                let payload = { Analytics_Report: root.Save_Report_Settings }
+
+                Analytics_app.add(payload).then( function(data) {
+                    if(data == 'OK') {
+                        root.showSuccessSaveReport = true
+                    } else {
+                        root.showSuccessSaveReport = false
+                        root.show_query_error_message = true
+                        root.query_error = "Access is not allowed for other tables. Here is a list of the permitted tables: " + root.tables_with_permission;
+                    }
+                })
+                .catch(function(error) {
+                    console.log("Encountered an error! [" + error + "]")
+                    alert("Request Failed: System error or you may not have enough privileges")
+                    loading_modal.hide()
+                });
+            } else {
+                root.show_query_error_message = true
+                root.query_error = "Access is not allowed for other tables. Here is a list of the permitted tables: " + root.tables_with_permission;
+            }
+        },
+
+        get_report_permissions: function() {
+            Analytics_app.get_report_modules().then( function(data) {
+                root.tables_with_permission = data
             })
             .catch(function(error) {
                 console.log("Encountered an error! [" + error + "]")
                 alert("Request Failed: System error or you may not have enough privileges")
                 loading_modal.hide()
             });
-        },
+        }, 
 
         submit: function(data) {
             
@@ -439,11 +473,20 @@ var root = new Vue({
                     console.log(data)
                     if(data.length > 0)
                     {
-                        root.report_result = data[0];
-                        root.temp_report_header = Object.keys(data[0][0])
-                        root.report_header = root.convert_to_system_display(root.temp_report_header)
-                        root.temp_csv_link = data[1];
-                        root.temp_pdf_link = data[2];
+                        if(data[0]['error']) {
+                            console.log(data[0]['error'])
+                            root.report_result = []
+                            root.temp_report_header = []
+                            root.show_query_error_message = true
+                            root.query_error = data[0]['error']
+                        } else {
+                            root.report_result = data[0];
+                            root.temp_report_header = Object.keys(data[0][0])
+                            root.report_header = root.convert_to_system_display(root.temp_report_header)
+                            root.temp_csv_link = data[1];
+                            root.temp_pdf_link = data[2];
+                            root.show_query_error_message = false
+                        }
                         console.log("VIEW: Retreived module data.")
                     } else {
                         root.report_result = []
@@ -467,43 +510,87 @@ var root = new Vue({
             }
         },
 
+        string_has_element_from_list: function(string, list) {
+            var lowercasedString = string.toLowerCase(); // Convert the string to lowercase
+            
+            for (var i = 0; i < list.length; i++) {
+              var lowercasedElement = list[i].toLowerCase(); // Convert the list element to lowercase
+              
+              if (lowercasedString.includes(lowercasedElement)) {
+                return true;
+              }
+            }
+            
+            return false;
+        },
+
         submit_query_box: function(query) {
             root.from_query_box = true
+            has_avoided_operation = root.string_has_element_from_list(query, root.operations_to_avoid)
             if(query != '') {
-                loading_modal.show();
-                metadata = ''
-                Is_Custom_Report = 'Yes'
-                report_data  = query
-                Analytics_app.get_result(Is_Custom_Report, report_data, metadata).then( function(data) {
+                if(has_avoided_operation) {
+                    root.report_result = []
+                    root.temp_report_header = []
+                    const findElementFromList = (string, list) => list.find(element => string.toLowerCase().includes(element.toLowerCase()));
+                    operation = findElementFromList(query, root.operations_to_avoid)
+                    root.show_query_error_message = true
+                    root.query_error = operation + " statement from the provided query is not allowed. Please make sure to use only SELECT statements.";
+                } else {
+                    var analytics_data = STARK.get_local_storage_item('Analytics_Data', 'analytics')
+                    tables_from_query = root.convert_to_system_display(root.extractTableName(query))
+                    valid_report = root.hasPermission(tables_from_query, root.tables_with_permission)
+                    if(valid_report) {
+                        loading_modal.show();
+                        metadata = ''
+                        Is_Custom_Report = 'Yes'
+                        report_data  = query
+                        Analytics_app.get_result(Is_Custom_Report, report_data, metadata).then( function(data) {
 
-                    if(data.length > 0)
-                    {
-                        root.report_result = data[0];
-                        root.temp_report_header = Object.keys(data[0][0])
-                        root.report_header = root.convert_to_system_display(root.temp_report_header)
-                        root.temp_csv_link = data[1];
-                        root.temp_pdf_link = data[2];
-                        console.log("VIEW: Retreived module data.")
+                            if(data.length > 0)
+                            {
+                                if(data[0]['error']) {
+                                    console.log(data[0]['error'])
+                                    root.report_result = []
+                                    root.temp_report_header = []
+                                    root.show_query_error_message = true
+                                    root.query_error = data[0]['error']
+                                } else {
+                                    root.report_result = data[0];
+                                    root.temp_report_header = Object.keys(data[0][0])
+                                    root.report_header = root.convert_to_system_display(root.temp_report_header)
+                                    root.temp_csv_link = data[1];
+                                    root.temp_pdf_link = data[2];
+                                    root.show_query_error_message = false
+                                }
+                                console.log("VIEW: Retreived module data.")
+                            } else {
+                                root.report_result = []
+                                root.temp_report_header = []
+                            }
+                            
+                            loading_modal.hide();
+                        })
+                        .catch(function(error) {
+                            console.log("Encountered an error! [" + error + "]")
+                            alert("Request Failed: System error or you may not have enough privileges")
+                            loading_modal.hide()
+                        });
                     } else {
                         root.report_result = []
                         root.temp_report_header = []
+                        root.show_query_error_message = true
+                        root.query_error = "Access is not allowed for other tables. Here is a list of the permitted tables: " + root.tables_with_permission;
                     }
-                    root.page_1_show = false
-                    root.page_2_show = false
-                    root.page_3_show = false
-                    root.page_4_show = false
-                    root.page_5_show = false
-                    root.page_6_show = false
-                    root.page_7_show = false
-                    root.page_0_show = false
-                    root.show_result = true
-                    loading_modal.hide();
-                })
-                .catch(function(error) {
-                    console.log("Encountered an error! [" + error + "]")
-                    alert("Request Failed: System error or you may not have enough privileges")
-                    loading_modal.hide()
-                });
+                }
+                root.page_1_show = false
+                root.page_2_show = false
+                root.page_3_show = false
+                root.page_4_show = false
+                root.page_5_show = false
+                root.page_6_show = false
+                root.page_7_show = false
+                root.page_0_show = false
+                root.show_result = true
             }
         },
 
@@ -611,25 +698,71 @@ var root = new Vue({
             }
         },
 
+        extractTableName: function (query) {
+            const regex = /\b(?:FROM|JOIN)\s+([^\s;]+)/gi;
+            const matches = query.match(regex);
+            if (matches && matches.length > 0) {
+                return matches.map(match => match.split(/\s+/)[1]);
+            }
+            return [];
+        },
+
+        hasPermission: function(array1, array2) {
+            bool_list = []
+            for (let i = 0; i < array1.length; i++) {
+              if (array2.includes(array1[i])) {
+                bool_list.push('true')
+              } else {
+                console.log(array1[i])
+                bool_list.push('false')
+              }
+            }
+
+            if(bool_list.includes('false')) {
+                return false
+            } else {
+                return true
+            }
+        },
+
         onReport_Type: function() {
             // Analytics_app.test_dump().then( function(data) {})
             if(root.Analytics.Choose_Report != ''){
                 root.delete_local_storage()
                 root.action_from_saved_report = false
                 root.from_query_box = false
+                root.showSuccessSaveReport = false
+                root.show_query_error_message = false
             }
 
             if(root.Analytics.Choose_Report == 'Saved Report') {
                 root.action_from_saved_report = true
                 if (root.list_status.Saved_Report == 'empty') {
                     Analytics_app.get_saved_reports().then( function(data) {
+                        var analytics_data = STARK.get_local_storage_item('Analytics_Data', 'analytics')
+                        var table_data = Object.keys(analytics_data)
+                        
                         root.lists.Saved_Report = []
                         saved_report_list = [...data].sort((a, b) => a - b)
-                        console.log(saved_report_list)
                         saved_report_list.forEach(function(arrayItem) {
-                            text = arrayItem['Report_Name']
-                            value = arrayItem['Report_Name']            
-                            root.lists.Saved_Report.push({ value: value, text: text }) 
+                            tables_with_permission = table_data
+                            if(arrayItem['Report_Name'].includes('- [Custom]')) {
+                                valid_report = true
+                                tables_from_Settings = root.convert_to_system_display(root.extractTableName(arrayItem['Report_Settings']))
+                                valid_report = root.hasPermission(tables_from_Settings, root.tables_with_permission)
+
+                            }else{
+                                
+                                tables_from_Settings = JSON.parse(arrayItem['Report_Settings']).tables
+                                valid_report = root.hasPermission(tables_from_Settings, root.tables_with_permission)
+                            }
+                            
+                            if(valid_report) {
+                                text = arrayItem['Report_Name']
+                                value = arrayItem['Report_Name']            
+                                root.lists.Saved_Report.push({ value: value, text: text }) 
+                            }
+                            
                         })
                         root.list_status.Saved_Report = 'populated'
                     }).catch(function(error) {
@@ -1354,9 +1487,53 @@ var root = new Vue({
             
         },
 
+        get_metadata: function(tables) {
+            loading_modal.show()
+            analytics_data = {};
+            tables.forEach(element => {
+                table = element.replace(' ', '_') + "_url"
+                fetchUrl = STARK[table] + '?rt=get_metadata'
+                analytics_data[element] = {};
+                STARK.request('GET', fetchUrl)
+                .then( function(data) {
+                    dataTypeMapping = {};
+                    root.get_relationship(element).then( function(rel_data) {
+                        if(rel_data['belongs_to'] && !rel_data['has_many'] && !rel_data['has_one']) {
+                            rel_data['belongs_to'].forEach(rel_element => {
+                                
+                                if(rel_element['rel_type'] == 'has_many') {
+                                    field = rel_element['pk_field']
+                                    data[field] = {data_type: 'string'};
+                                }
+                            });
+                        }
+                        new_data = data
+                        for (key in new_data) {
+                            fields = {}
+                            if (data.hasOwnProperty(key)) {
+                                const dataType = data[key].data_type
+                                analytics_data[element][key] = dataType.charAt(0).toUpperCase() + dataType.slice(1)
+                            }
+                        }
+                        STARK.set_local_storage_item('Analytics_Data', 'analytics', analytics_data)
+                        loading_modal.hide()
+                    })
+                })
+            });
+        },
+
+        get_relationship: function(table) {
+            table_url = table.replace(' ', '_') + "_url"
+            fetchUrl = STARK[table_url] + '?rt=get_relationship'
+            return STARK.request('GET', fetchUrl)
+        },
+
         set_local_storage_data() {
-            tables = STARK.get_local_storage_item('Analytics_Table', 'tables')
-            sidebar.get_metadata(tables)
+            fetchUrl = STARK.STARK_Module_url + '?rt=usermodules'
+            STARK.request('GET', fetchUrl)
+            .then( function(data) {
+                root.get_metadata(data['report_items'])
+            })
         },
 
         delete_local_storage() {
@@ -1430,3 +1607,4 @@ var root = new Vue({
 // root.get_tables()
 root.add_row('Filter')
 root.set_local_storage_data()
+root.get_report_permissions()

@@ -19,6 +19,8 @@ def create(data):
     import boto3
     import json
     import base64
+    import re
+    from botocore.exceptions import ClientError
     
     import stark_core
     from stark_core import data_abstraction
@@ -64,6 +66,7 @@ def create(data):
 
                 data['Report_Name'] = report_name
                 data['Report_Settings'] = payload.get('Report_Settings','')
+                data['Is_Custom_Report'] = payload.get('Is_Custom_Report','')
                 
             if method == 'POST':
                 response = save_report(data)
@@ -73,69 +76,91 @@ def create(data):
             
             if request_type == 'detail':
                 is_custom_report = event.get('queryStringParameters').get('is_custom_report','')
+                table_with_permission = get_report_modules(username)
                 if(is_custom_report == 'Yes'):
                     query = event.get('queryStringParameters').get('Query','')
+                    table_from_query = [word.replace('_', ' ').title() for word in extract_table_name(query)]
+                    valid_report = has_permission(table_from_query, table_with_permission)
                 else:
                     report_data = event.get('queryStringParameters').get('Query','')
+                    data = json.loads(report_data)
+                    table_from_query = data['tables']
+                    valid_report = has_permission(table_from_query, table_with_permission)
                     query = compose_query(report_data)
-                
-                temp_metadata = event.get('queryStringParameters').get('Metadata','')
-                temp_response = get_query_result(query)
-                
-                if(temp_metadata):
-                    metadata = eval(event.get('queryStringParameters').get('Metadata',''))
-                else:
-                    tmp_metadata = get_query_metadata(query)
-                    metadata = {{
-                        item["column_name"].title(): {{'data_type': 'String' if item["data_type"] == 'varchar' 
-                                                    else 'Float' if item["data_type"] == 'real'
-                                                    else item["data_type"].capitalize()}}
-                        for item in tmp_metadata
-                    }}
 
-                if(temp_response):
-                    report_list = []
-                    for d in temp_response:
-                        customer_modified = {{}}
-                        for key, value in d.items():
-                            if("Sum_of" not in key and "Count_of" not in key):
-                                words = key.split('_')
-                                words = [word.capitalize() for word in words]
-                                new_key = ' '.join(words)
-                                customer_modified[new_key] = value
-                            else:
-                                words = key.split('_of_')
-                                words = [word.capitalize() for word in words]
-                                new_key = ' of '.join(words)
-                                customer_modified[new_key] = value
-                        report_list.append(customer_modified)
-                    
-                    key_dict = OrderedDict()
-                    for customer_dict in report_list:
-                        for key in customer_dict.keys():
-                            if key not in key_dict:
-                                key_dict[key] = None
-                    
-                    report_header = list(key_dict.keys())
-                    print(report_header)
-                    pk_field = ''
-                    report_param_dict = {{}}
-                    csv_file, file_buff_value = utilities.create_csv(report_list, report_header)
-                    utilities.save_object_to_bucket(file_buff_value, csv_file)
-                    pdf_file, pdf_output = utilities.prepare_pdf_data(report_list, report_header, report_param_dict, metadata, pk_field)
-                    utilities.save_object_to_bucket(pdf_output, pdf_file)
-                    
-                    csv_bucket_key = bucket_tmp + csv_file
-                    pdf_bucket_key = bucket_tmp + pdf_file
-                    response = report_list, csv_bucket_key, pdf_bucket_key
+                query_error_list = validate_query(query)
+                error_exists = any('error' in item for item in query_error_list)
+                
+                if not error_exists:
+                    if valid_report:
+
+                        temp_metadata = event.get('queryStringParameters').get('Metadata','')
+                        temp_response = get_query_result(query)
+        
+                        if(temp_metadata):
+                            metadata = eval(event.get('queryStringParameters').get('Metadata',''))
+                        else:
+                            tmp_metadata = get_query_metadata(query)
+                            metadata = {{
+                                item["column_name"].title(): {{'data_type': 'String' if item["data_type"] == 'varchar' 
+                                                            else 'Float' if item["data_type"] == 'real'
+                                                            else item["data_type"].capitalize()}}
+                                for item in tmp_metadata
+                            }}
+        
+                        if(temp_response):
+                            report_list = []
+                            for d in temp_response:
+                                customer_modified = {{}}
+                                for key, value in d.items():
+                                    if("Sum_of" not in key and "Count_of" not in key):
+                                        words = key.split('_')
+                                        words = [word.capitalize() for word in words]
+                                        new_key = ' '.join(words)
+                                        customer_modified[new_key] = value
+                                    else:
+                                        words = key.split('_of_')
+                                        words = [word.capitalize() for word in words]
+                                        new_key = ' of '.join(words)
+                                        customer_modified[new_key] = value
+                                report_list.append(customer_modified)
+        
+                            key_dict = OrderedDict()
+                            for customer_dict in report_list:
+                                for key in customer_dict.keys():
+                                    if key not in key_dict:
+                                        key_dict[key] = None
+        
+                            report_header = list(key_dict.keys())
+                            print(report_header)
+                            pk_field = ''
+                            report_param_dict = {{}}
+                            csv_file, file_buff_value = utilities.create_csv(report_list, report_header)
+                            utilities.save_object_to_bucket(file_buff_value, csv_file)
+                            pdf_file, pdf_output = utilities.prepare_pdf_data(report_list, report_header, report_param_dict, metadata, pk_field)
+                            utilities.save_object_to_bucket(pdf_output, pdf_file)
+        
+                            csv_bucket_key = bucket_tmp + csv_file
+                            pdf_bucket_key = bucket_tmp + pdf_file
+                            response = report_list, csv_bucket_key, pdf_bucket_key
+                        else:
+                            response = []
+                    else:
+                        rows = []
+                        error_message = "Access is not allowed for other tables. Here is a list of the permitted tables: " + ', '.join(table_with_permission)
+                        rows.append({{"error": error_message}})
+                        response = rows
                 else:
-                    response = []
+                    response = query_error_list
+                
             elif request_type == 'get_saved_reports':
                 response = get_saved_reports()
             elif request_type == "get_saved_report_settings":
                 report_name = event.get('queryStringParameters').get('report_name','')
                 print(report_name)
                 response = get_saved_report_settings(report_name)
+            elif request_type == "get_report_modules":
+                response = get_report_modules(username)
         
         return {{
             "isBase64Encoded": False,
@@ -145,6 +170,29 @@ def create(data):
                 "Content-Type": "application/json",
             }}
         }}
+
+    def has_permission(array1, array2):
+        bool_list = []
+        for item in array1:
+            if item in array2:
+                bool_list.append(True)
+            else:
+                bool_list.append(False)
+        
+        if False in bool_list:
+            return False
+        else:
+            return True
+        
+
+    def extract_table_name(query):
+        regex = r'\\b(?:FROM|JOIN)\s+([^\s;]+)'
+        matches = re.findall(regex, query, flags=re.IGNORECASE)
+        
+        if matches:
+            return [re.split(r'\s+', match)[0] for match in matches]
+        
+        return []
 
     def get_saved_report_settings(pk, sk=default_sk, db_handler = None):
         if db_handler == None:
@@ -176,28 +224,76 @@ def create(data):
 
         return items
 
-    def save_report(data, method='POST', db_handler = None):
-        print('data')
-        print(data)
-        if db_handler == None:
-            db_handler = ddb
-        sk = default_sk
-        pk = str(data.get('Report_Name', ''))
-        Report_Settings = str(data.get('Report_Settings', ''))
-        item = utilities.append_record_metadata('add', username)
-        item['pk'] = {{'S' : pk}}
-        item['sk'] = {{'S' : sk}}
-        item['Report_Settings'] = {{'S' : Report_Settings}}
-        item['STARK-ListView-sk'] = {{'S' : pk}}
+    def validate_query(analytics_query):
+        try:
+            # print(analytics_query)
+            response = athena.start_query_execution(
+                QueryString=analytics_query, 
+                QueryExecutionContext={{'Database': database}}, 
+                ResultConfiguration={{'OutputLocation': 's3://{s3_athena_bucket_name}/result'}}
+            )
 
-        ddb_arguments = {{}}
-        ddb_arguments['TableName'] = ddb_table
-        ddb_arguments['Item'] = item
-        response = db_handler.put_item(**ddb_arguments)
+            # get the query execution ID
+            query_execution_id = response['QueryExecutionId']
+
+            # wait for the query to complete
+            while True:
+                failure_reason = ''
+                query_status = athena.get_query_execution(QueryExecutionId=query_execution_id)
+                status = query_status['QueryExecution']['Status']['State']
+                if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                    if status == 'FAILED':
+                        failure_reason = query_status['QueryExecution']['Status']['StateChangeReason']
+                    break
+
+            rows = []
+            if failure_reason != '':
+                rows = []
+                rows.append({{"error": failure_reason}})
+
+        except ClientError as e:
+            error_message = e.response['Error']['Message']
+            rows = []
+            rows.append({{"error": error_message}})
+        
+        return rows
+
+    def save_report(data, method='POST', db_handler = None):
     
-        global resp_obj
-        resp_obj = response
-        return "OK"
+        if data['Is_Custom_Report']: 
+            table_with_permission = get_report_modules(username)
+            table_from_query = [word.replace('_', ' ').title() for word in extract_table_name(data['Report_Settings'])]
+            valid_report = has_permission(table_from_query, table_with_permission)
+        else: 
+            table_with_permission = get_report_modules(username)
+            data = json.loads(data['Report_Settings'])
+            table_from_query = data['tables']
+            valid_report = has_permission(table_from_query, table_with_permission)
+        # print(valid_report)
+
+        if valid_report:
+            if db_handler == None:
+                db_handler = ddb
+            sk = default_sk
+            pk = str(data.get('Report_Name', ''))
+            Report_Settings = str(data.get('Report_Settings', ''))
+            item = utilities.append_record_metadata('add', username)
+            item['pk'] = {{'S' : pk}}
+            item['sk'] = {{'S' : sk}}
+            item['Report_Settings'] = {{'S' : Report_Settings}}
+            item['STARK-ListView-sk'] = {{'S' : pk}}
+
+            ddb_arguments = {{}}
+            ddb_arguments['TableName'] = ddb_table
+            ddb_arguments['Item'] = item
+            response = db_handler.put_item(**ddb_arguments)
+
+            global resp_obj
+            resp_obj = response
+            return "OK"
+        else:
+            return "Error"
+ 
 
     def get_saved_reports(sk=default_sk, db_handler = None):
         if db_handler == None:
@@ -285,7 +381,10 @@ def create(data):
         for result in query_results['ResultSet']['Rows'][1:]:
             row = {{}}
             for i in range(len(column_names)):
-                row[column_names[i]] = result['Data'][i]['VarCharValue']
+                if(len(result['Data'][i]) != 0):
+                    row[column_names[i]] = result['Data'][i]['VarCharValue']
+                else:
+                    row[column_names[i]] = ''
             rows.append(row)
         
         return rows
@@ -344,7 +443,7 @@ def create(data):
 
         # COUNT =====================================
         sql_count = ", ".join([f"COUNT({{col}}) AS Count_of_{{col.split('.')[-1].capitalize()}}" for col in data['count']])
-        
+
         # SELECT FIELDS =====================================
         if data['group_by'] != '':
             grp_by_table = data['group_by'].split(".")[0]
@@ -414,6 +513,57 @@ def create(data):
         query = "SELECT " + str_fields + " FROM " + str_table + where_clause + group_by + sort 
         print(query)
         return query
+        
+    def get_report_modules(username):
+        # 
+        ########################
+        #1.GET USER PERMISSIONS
+        #FIXME: Getting user permissions should be a STARK Core framework utility, only here for now for urgent MVP implementation,
+        #       to not hold up related features that need implementation ASAP
+        sk = 'STARK|module'
+        response = ddb.query(
+            TableName=ddb_table,
+            Select='ALL_ATTRIBUTES',
+            ReturnConsumedCapacity='TOTAL',
+            KeyConditionExpression='pk = :pk and sk = :sk',
+            ExpressionAttributeValues={{
+                ':pk' : {{'S' : username}},
+                ':sk' : {{'S' : "STARK|user|permissions"}}
+            }}
+        )
+
+        raw = response.get('Items')
+        permissions = []
+        for record in raw:
+            permission_string = record.get('Permissions',{{}}).get('S','')
+        
+        #Split permission_string by the delimeter (comma+space / ", ")
+        permissions_list = permission_string.split(", ")
+
+        ##################################
+        #GET SYSTEM MODULES (ENABLED ONLY)
+        response = ddb.query(
+            TableName=ddb_table,
+            IndexName="STARK-ListView-Index",
+            Select='ALL_ATTRIBUTES',
+            ReturnConsumedCapacity='TOTAL',
+            KeyConditionExpression='sk = :sk',
+            ExpressionAttributeValues={{
+                ':sk' : {{'S' : sk}}
+            }}
+        )
+        raw = response.get('Items')
+
+        report_items = []
+        for record in raw:
+            if 'pk' in record and '|Report' in record['pk']['S'] and 'STARK_' not in record.get('Target', {{}}).get('S'):
+                if record.get('pk', {{}}).get('S','') in permissions_list:
+                    item = {{}}
+                    item = record.get('Descriptive_Title',{{}}).get('S','').replace('Report ', '')
+                    report_items.append(item)
+
+        return report_items
+
 
     def dump_csv():
         entities = {entities_varname}
