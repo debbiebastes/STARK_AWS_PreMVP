@@ -225,6 +225,7 @@ def create_handler(event, context):
     #   such as if a dozen or so entities are requested for code generation. Implement commit chunking here for safety.
     ctr                 = 0
     key                 = 0
+    total_commit_size   = 0
     chunked_commit_list = {}
     for item in files_to_commit:
         if ctr == 100:
@@ -234,6 +235,7 @@ def create_handler(event, context):
         if chunked_commit_list.get(key, '') == '':
             chunked_commit_list[key] = []
         chunked_commit_list[key].append(item)
+        total_commit_size += len(item['fileContent'])
 
     ctr         = 0
     batch_count = key + 1
