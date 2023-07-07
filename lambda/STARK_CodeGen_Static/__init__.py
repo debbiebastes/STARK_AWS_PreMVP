@@ -221,21 +221,23 @@ def create_handler(event, context):
 
     ##############################################
     #Commit our prebuilt files to the project repo
-    #   There's a codecommit limit of 100 files - this will fail if more than 100 static files are needed,
+    #   There's a codecommit limit of 100 files and 7MB - this will fail if more than 100 static files are needed,
     #   such as if a dozen or so entities are requested for code generation. Implement commit chunking here for safety.
     ctr                 = 0
     key                 = 0
     total_commit_size   = 0
+    total_commit_limit  = 6000000  #Let's stop at 6MB
     chunked_commit_list = {}
     for item in files_to_commit:
-        if ctr == 100:
+        total_commit_size += len(item['fileContent'])
+        if ctr == 100 or total_commit_size > total_commit_limit:
             key = key + 1
             ctr = 0
+            total_commit_size = len(item['fileContent'])
         ctr = ctr + 1
         if chunked_commit_list.get(key, '') == '':
             chunked_commit_list[key] = []
         chunked_commit_list[key].append(item)
-        total_commit_size += len(item['fileContent'])
 
     ctr         = 0
     batch_count = key + 1
