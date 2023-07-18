@@ -230,6 +230,7 @@ def create(data, cli_mode=False):
                             - '*'
                           AllowedMethods:
                             - PUT
+                            - POST
                           AllowedOrigins:
                             - '*'
                           ExposedHeaders:
@@ -977,11 +978,12 @@ def create(data, cli_mode=False):
                     - AWSLambda_FullAccess
                     - AmazonS3FullAccess
                 Architectures:
-                    - x86_64
+                    - arm64
                 MemorySize: 128
                 Timeout: 60
                 Layers:
                     - !Ref RequestsLayer
+                    - !Ref OpenAILayer
         STARKBackendApiForSTARKUser:
             Type: AWS::Serverless::Function
             Properties:
@@ -1313,12 +1315,20 @@ def create(data, cli_mode=False):
                 - STARKBucketCleaner
                 - STARKDynamoDB
                 - STARKProjectDefaultLambdaServiceRole
-        Type: AWS::SSM::Parameter
-        Properties: 
-            Name: {project_name} OPENAI_API_KEY
-            Type: String
-            Description: Place your OpenAI API Key here
-            Value: (Your API Key)
+        STARKOpenAIAPIKey:
+            Type: AWS::SSM::Parameter
+            Properties: 
+                Name: {project_varname}_OPENAI_API_KEY
+                Type: String
+                Description: Place your OpenAI API Key here
+                Value: (Your API Key)
+        STARKGenAIFuncName:
+            Type: AWS::SSM::Parameter
+            Properties: 
+                Name: {project_varname}_GENAI_LAMBDA_FUNC
+                Type: String
+                Description: The STARK GenAI Function for this project
+                Value: !Ref GenAIforSTARK
         """
 
     return textwrap.dedent(cf_template)
